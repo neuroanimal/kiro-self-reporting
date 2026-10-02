@@ -1,0 +1,5 @@
+# working copy of the live SQLite DB (should never be committed; auto-removed anyway)
+kiro_data_copy.sqlite3
+*.sqlite3
+__pycache__/
+*.pyc
