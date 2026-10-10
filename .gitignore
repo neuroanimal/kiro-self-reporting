@@ -3,3 +3,10 @@ kiro_data_copy.sqlite3
 *.sqlite3
 __pycache__/
 *.pyc
+
+# generated per-topic exports live in their own project folders, not here
+
+# Generated report of every AI chat session. Excluded because it aggregates the
+# full text of all conversations, so anything ever typed into any session —
+# across every project — would end up in it.
+_report.ai.html
