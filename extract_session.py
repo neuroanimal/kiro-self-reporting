@@ -17,10 +17,12 @@ file per prompt and per answer, with real line breaks.
 Output, per selected conversation:
     <out>/<yaml name without .yaml>/
         README.txt                 conversation id, working directory, dates, counts
-        0001/prompt.txt            what the user typed
-        0001/response.txt          every assistant text of that exchange, in order
-        0001/tools.txt             (with --with-tools) commands and outputs
-        0002/...
+        summary_NN.txt             the /compact summaries (what came before the kept history)
+        transcript.txt             the chat as kiro-cli shows it
+        20261104_093059123_01/prompt.txt     what the user typed (folder = start time + number)
+        20261104_093059123_01/response.txt   every assistant text of that exchange, in order
+        20261104_093059123_01/tools.txt      (with --with-tools) commands and outputs
+        ..._00/                    tool output left from before the first kept prompt, if any
     <out>/<yaml name without .yaml>.zip   the folder above, zipped
 
 An "exchange" starts with a user prompt and lasts until the next prompt; the tool
@@ -59,26 +61,44 @@ def pick(index, selectors):
 
 
 def split_exchanges(turns):
-    """Group turns into exchanges: [prompt, [assistant texts], [tool lines]]."""
+    """Group turns into exchanges: dict(time, prompt, texts, tools), in stored order.
+
+    An exchange starts at a real user prompt. Tool output that kiro-cli replayed as a prompt
+    (after a compaction) is not a prompt: it goes to the tools of the current exchange, or,
+    before the first real prompt, to exchange 0 ("before the first prompt of the kept history").
+    """
     exchanges = []
     for turn in turns:
         user, assistant = turn.get("user") or {}, turn.get("assistant") or {}
         if "prompt" in user or not exchanges:
-            exchanges.append([user.get("prompt", ""), [], []])
-        texts, tools = exchanges[-1][1], exchanges[-1][2]
+            exchanges.append({"time": turn.get("time") or "", "prompt": user.get("prompt"),
+                              "texts": [], "tools": []})
+        cur = exchanges[-1]
+        if not cur["time"]:
+            cur["time"] = turn.get("time") or ""
+        if "tool_output_as_prompt" in user:
+            cur["tools"].append(f"--- tool output (replayed as a prompt by kiro-cli):\n{user['tool_output_as_prompt']}")
         for res in user.get("tool_results") or []:
-            tools.append(f"--- result ({res.get('status')}):\n{res.get('output', '')}")
+            cur["tools"].append(f"--- result ({res.get('status')}):\n{res.get('output', '')}")
         if "cancelled_tool_uses" in user:
-            tools.append("--- cancelled tool uses")
+            cur["tools"].append("--- cancelled tool uses")
         if assistant.get("response"):
-            texts.append(assistant["response"])
+            cur["texts"].append(assistant["response"])
         if assistant.get("text"):
-            texts.append(assistant["text"])
+            cur["texts"].append(assistant["text"])
         for call in assistant.get("tool_calls") or []:
             args = call.get("args") or {}
             body = "\n".join(f"{k}: {v}" for k, v in args.items())
-            tools.append(f"--- call {call.get('tool')}:\n{body}")
+            cur["tools"].append(f"--- call {call.get('tool')}:\n{body}")
     return exchanges
+
+
+def folder_name(exchange, num, width):
+    """YYYYMMDD_HHmmssSSS_NN from the exchange's start time; NNNN_no-time when none is stored."""
+    stamp = exchange["time"]
+    if len(stamp) >= 23:
+        return f"{stamp[0:4]}{stamp[5:7]}{stamp[8:10]}_{stamp[11:13]}{stamp[14:16]}{stamp[17:19]}{stamp[20:23]}_{num:0{width}d}"
+    return f"{num:0{width + 2}d}_no-time"
 
 
 def write_text(path, text):
@@ -100,15 +120,34 @@ def extract(zf, entry, out_root, with_tools):
         f"working directory: {doc.get('cwd')}",
         f"created: {doc.get('created')}   updated: {doc.get('updated')}",
         f"turns: {doc.get('turns')}   exchanges: {len(exchanges)}   ended with: {doc.get('ended_with')}",
-        "", "Each NNNN folder is one exchange: prompt.txt, response.txt"
-        + (", tools.txt" if with_tools else "") + "."]))
-    for num, (prompt, texts, tools) in enumerate(exchanges, 1):
-        folder = os.path.join(base, f"{num:04d}")
+        "",
+        "Each folder YYYYMMDD_HHmmssSSS_NN is one exchange (start time of its first turn, then its",
+        "number): prompt.txt, response.txt" + (", tools.txt" if with_tools else "") + ". Folder _00, if present,",
+        "holds what was left of an exchange before the first prompt of the kept history (after /compact).",
+        "summary_NN.txt are the /compact summaries; transcript.txt is the chat as kiro-cli shows it.",
+        "Text marked 'content truncated due to length' was already cut by kiro-cli when it was stored."]))
+    for idx, summary in enumerate(doc.get("summaries") or [], 1):
+        path = os.path.join(base, f"summary_{idx:02d}.txt")
+        write_text(path, summary if isinstance(summary, str) else yaml.safe_dump(summary, allow_unicode=True))
+        written.append(path)
+    if doc.get("transcript"):
+        path = os.path.join(base, "transcript.txt")
+        write_text(path, "\n\n".join(str(t) for t in doc["transcript"]))
+        written.append(path)
+    first_is_context = bool(exchanges) and exchanges[0]["prompt"] is None
+    width = max(2, len(str(len(exchanges))))
+    for idx, exch in enumerate(exchanges):
+        num = idx if first_is_context else idx + 1
+        folder = os.path.join(base, folder_name(exch, num, width))
         os.makedirs(folder, exist_ok=True)
-        files = [("prompt.txt", prompt), ("response.txt", "\n\n".join(texts))]
-        if with_tools and tools:
-            files.append(("tools.txt", "\n\n".join(tools)))
+        files = [("response.txt", "\n\n".join(exch["texts"]))]
+        if exch["prompt"] is not None:
+            files.insert(0, ("prompt.txt", exch["prompt"]))
+        if with_tools and exch["tools"]:
+            files.append(("tools.txt", "\n\n".join(exch["tools"])))
         for name, text in files:
+            if name == "response.txt" and not text:
+                continue
             path = os.path.join(folder, name)
             write_text(path, text)
             written.append(path)

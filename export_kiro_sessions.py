@@ -7,8 +7,11 @@ This script never opens the live database: like make_report.py it copies it to
 /tmp/kiro_export_copy.sqlite3 with a plain file copy, reads the copy with
 mode=ro&immutable=1 and deletes it afterwards. It writes, per conversation, a YAML file with:
   - metadata (id, working directory, created/updated, number of turns, how it ended);
+  - ``summaries``: the /compact summaries (what came before the kept history);
   - ``transcript``: the readable chat as kiro-cli shows it (prompts start with "> ");
-  - ``turns``: every turn - user prompt or tool results, assistant text and tool calls
+  - ``turns``: every turn with its start time - user prompt or tool results (tool output
+    that kiro-cli replayed as a prompt after a compaction is marked as such), assistant
+    text and tool calls
     (tool outputs are cut to --max-output characters to keep the files readable).
 
 Usage:
@@ -44,6 +47,36 @@ def cut(text, limit):
         return text
     half = limit // 2
     return f"{text[:half]}\n... [{len(text) - limit} chars cut] ...\n{text[-half:]}"
+
+
+def turn_time(entry):
+    """Return the turn's start time as 'YYYY-MM-DD HH:MM:SS.mmm' (local), or '' if not stored.
+
+    kiro-cli keeps user.timestamp (often null) and request_metadata.request_start_timestamp_ms
+    (the moment the request for this turn was sent); the first one present is used.
+    """
+    user = entry.get("user") or {}
+    stamp = user.get("timestamp")
+    if isinstance(stamp, str) and stamp:
+        return stamp
+    meta = entry.get("request_metadata") or {}
+    msecs = meta.get("request_start_timestamp_ms")
+    if isinstance(stamp, (int, float)) and stamp:
+        msecs = stamp if stamp > 1e11 else stamp * 1000
+    if not msecs:
+        return ""
+    when = datetime.datetime.fromtimestamp(msecs / 1000)
+    return when.strftime("%Y-%m-%d %H:%M:%S.") + f"{int(msecs) % 1000:03d}"
+
+
+def is_tool_output(text):
+    """True when a 'prompt' is really tool output that kiro-cli replayed as a prompt.
+
+    After a context compaction the kept history can start in the middle of an exchange,
+    with the pending tool results stored as a Prompt; such text is JSON from a tool.
+    """
+    head = text.lstrip()[:40]
+    return head.startswith('{"exit_status"') or head.startswith('{"content"')
 
 
 def user_part(content, limit):
@@ -109,13 +142,17 @@ def main():
         hist = d.get("history") or []
         turns = []
         for e in hist:
-            turns.append({"user": user_part(e.get("user", {}).get("content", {}), a.max_output),
+            upart = user_part(e.get("user", {}).get("content", {}), a.max_output)
+            if "prompt" in upart and is_tool_output(upart["prompt"]):
+                upart = {"tool_output_as_prompt": cut(upart.pop("prompt"), a.max_output)}
+            turns.append({"time": turn_time(e), "user": upart,
                           "assistant": assistant_part(e.get("assistant"), a.max_output)})
         last = turns[-1]["assistant"] if turns else {}
         ended = "response" if "response" in last else ("tool_call (interrupted?)" if "tool_calls" in last else "unknown")
         meta = {"conversation_id": cid, "cwd": key, "created": to_dt(created), "updated": to_dt(updated),
                 "turns": len(turns), "ended_with": ended}
-        doc = dict(meta, transcript=d.get("transcript") or [], turns=turns)
+        # latest_summary: the summaries kiro-cli wrote at each /compact (text before the kept history)
+        doc = dict(meta, summaries=d.get("latest_summary") or [], transcript=d.get("transcript") or [], turns=turns)
         name = f"{to_dt(updated)[:10]}_{cid[:8]}_{os.path.basename(key.rstrip('/')) or 'home'}.yaml"
         path = os.path.join(a.out, name)
         with open(path, "w", encoding="utf-8") as fh:
