@@ -48,3 +48,17 @@ Workspace path | Msgs | Title | About | Ended-with | Source`
 - Click any column header to sort (toggles asc/desc); Date and Msgs sort
   numerically via `data-sort`.
 - "Wyczyść filtry" button and a visible/total counter.
+
+## Export all sessions and read one of them as plain text
+
+```bash
+python3 export_kiro_sessions.py --out ~/kiro_sessions_export/all_<date> [--since 2026-10-21] [--cwd-filter cfg/tools]
+python3 extract_session.py ~/kiro_sessions_export/all_<date>.zip --list
+python3 extract_session.py ~/kiro_sessions_export/all_<date>.zip --select <number|id prefix> [--with-tools]
+```
+
+`export_kiro_sessions.py` writes one YAML per conversation (metadata, transcript, every turn) plus
+`index.yaml` and a zip; like `make_report.py` it reads a snapshot copy of the DB, never the live one.
+`extract_session.py` turns a selected conversation into `NNNN/prompt.txt` and `NNNN/response.txt`
+(optionally `tools.txt`) with real line breaks, under `C:\Users\estagrz\Downloads\_kiro_\_output_\`
+by default, and zips that folder.
